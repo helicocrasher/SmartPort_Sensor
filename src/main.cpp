@@ -38,8 +38,8 @@ void prepare_SensorPacket(uint32_t packetNr);
 void setSensorValue(uint8_t start, uint8_t length, uint32_t sensorValue);
 
 uint32_t i=0, sensorPacketNr=0;
-static char txPacket[8] = {VALID_SENSOR_PACKAGE , 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // Buffer for sending SmartPort data
-static char emptyPacket[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff}; // empty packet as no update
+static char txPacket[8] =     {VALID_SENSOR_PACKAGE , 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // Buffer for sending SmartPort data used for valid telemetry data - will be updated with sensor values and CRC before sending
+static char emptyPacket[8] =  {0x00,                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff}; // empty packet if no new data is available - will be dumped by the receiver - does not use telemetry bandwidth
 
 char  iFormatedString[8];
 uint8_t readBufINdex = 0; // Index for the read buffer
@@ -57,8 +57,15 @@ void setup() {
 
 //  Serial1.setTx(PB6);
 //  Serial1.setRx(PB7);
+#ifdef TARGET_G431CB
   Serial_DBG.setTx(PC10);
   Serial_DBG.setRx(PC11);
+#endif
+#ifdef TARGET_G031F8
+  Serial_DBG.setTx(PB6);
+  Serial_DBG.setRx(PB7);
+#endif
+
   Serial_DBG.begin(115200);      // Hardware Serial_DBG for debugging output
   delay(200);
   Serial_DBG.println("SmartPort Sensor Hub starting up");
@@ -185,8 +192,8 @@ void sendMyNextSmartPortData(bool validData) {
   // Send the next SmartPort data package
   if (validData) {
     setCRC(); // Calculate and set the CRC in the txPacket buffer
-  sprintf(iFormatedString, "%02X : ", (uint8_t)mySP_ID);
-  Serial_DBG.print(iFormatedString); // Print used Sensor ID 
+    sprintf(iFormatedString, "%02X : ", (uint8_t)mySP_ID);
+    Serial_DBG.print(iFormatedString); // Print used Sensor ID 
   }
   for (uint8_t i = 0; i < sizeof txPacket; i++) {                 // Send the complete SmartPort data package
     if (validData) {
@@ -196,11 +203,7 @@ void sendMyNextSmartPortData(bool validData) {
     }
     else {
       outputSmartPortData(emptyPacket[i]); // Send empty data package
-//      sprintf(iFormatedString, "%02X ", (uint8_t)emptyPacket[i]);
-//      Serial_DBG.print(iFormatedString); // Print empty byte
     }
-//    Serial1.print( txPacket[i], HEX );
-//    Serial1.print(" ");
   }
   if (validData) {
     Serial_DBG.println();
