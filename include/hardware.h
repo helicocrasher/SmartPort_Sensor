@@ -3,12 +3,12 @@
 
 #ifdef TARGET_G031F8
   #define LED_BUILTIN PA4
-  HardwareSerial Serial1(USART1); // Pb3, PB7, TX, RX
+    HardwareSerial Serial1(USART1); // PB6, PB7, TX, RX
   #ifndef Serial2
-    HardwareSerial Serial2(USART2); // Smartport input PA2, PA3 TX, RX 
+    HardwareSerial Serial2(USART2); // PA2, PA3, TX, RX 
   #endif 
-  #define Serial_SP Serial2
-  #define Serial_DBG Serial1
+  #define Serial_SP Serial1
+  #define Serial_DBG Serial2
 #endif
 
 

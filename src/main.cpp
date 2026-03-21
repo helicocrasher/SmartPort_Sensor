@@ -22,13 +22,16 @@
 #define SP_ESCAPE 0x07d // Escape character for SmartPort protocol
 #define VALID_SENSOR_PACKAGE 0x10 // Valid sensor data indicator for SmartPort protocol
 #define SENSOR_ID 0x0900 // Sensor ID for SmartPort protocol (Voltage sensor)
-#define VALID_DATA_INTERVAL_MS 100 // Interval for valid data updates
+#define VALID_DATA_INTERVAL_MS 50 // Interval for valid data updates
+#define degree_in_minutes_div10k 600000 // Factor to convert degree to minute x 10k for GPS data encoding in SmartPort protocol
 
-
-void read_SmartPort(void);
+void syncToSP (void); 
+void sniff_SmartPort(void);
+void answer_SmartPort();
 bool check_am_I_addressed();
 void sendMyNextSmartPortData(bool validData);
 void outputSmartPortData(uint8_t character);
+char readSmartPortData();
 void printSmartPortData();
 void clearReadBuffer();
 void setSensorID(uint16_t sensorID);
@@ -36,12 +39,18 @@ void setSensorValue(uint32_t sensorValue);
 void setCRC(void);
 void prepare_SensorPacket(uint32_t packetNr);
 void setSensorValue(uint8_t start, uint8_t length, uint32_t sensorValue);
+void prepare_SP_LON_Packet(int32_t lon_min_X10k);
+void prepare_SP_LAT_Packet(int32_t lat_min_X10k);
+void prepare_SP_Time_Packet(uint8_t hour, uint8_t minute, uint8_t second);
+void prepare_SP_Date_Packet(uint8_t year, uint8_t month, uint8_t day);
 
 uint32_t i=0, sensorPacketNr=0;
 static char txPacket[8] =     {VALID_SENSOR_PACKAGE , 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // Buffer for sending SmartPort data used for valid telemetry data - will be updated with sensor values and CRC before sending
-static char emptyPacket[8] =  {0x00,                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff}; // empty packet if no new data is available - will be dumped by the receiver - does not use telemetry bandwidth
+static char emptyTxPacket[8] =  {0x00,                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff}; // empty packet if no new data is available - will be dumped by the receiver - does not use telemetry bandwidth
+static char rxPacket[9]; // Buffer for received SmartPort data  rxPacket[0] = Sensor_ID polled by the SP master
 
 char  iFormatedString[8];
+char readBuffer[16]; // Buffer for reading SmartPort data
 uint8_t readBufINdex = 0; // Index for the read buffer
 static uint32_t *longData = 0; // Pointer for long data
 uint32_t timeNow=0, LastTimeNow=0;
@@ -51,24 +60,23 @@ uint32_t timeNow=0, LastTimeNow=0;
 //int myFunction(int, int);
 
 void setup() {
-// put your setup code here, to run once:
-// int result = myFunction(2, 3);
   pinMode(LED_BUILTIN, OUTPUT);
-
-//  Serial1.setTx(PB6);
-//  Serial1.setRx(PB7);
 #ifdef TARGET_G431CB
   Serial_DBG.setTx(PC10);
   Serial_DBG.setRx(PC11);
+  Serial_SP.setTx(PA9);
+  Serial_SP.setRx(PA10);
 #endif
 #ifdef TARGET_G031F8
-  Serial_DBG.setTx(PB6);
-  Serial_DBG.setRx(PB7);
+  Serial_DBG.setTx(PA2);
+  Serial_DBG.setRx(PA3);
+  Serial_SP.setTx(PB6);
+  Serial_SP.setRx(PB7);
 #endif
-
   Serial_DBG.begin(115200);      // Hardware Serial_DBG for debugging output
-  delay(200);
+  delay(20);
   Serial_DBG.println("SmartPort Sensor Hub starting up");
+  delay(10);
   Serial_SP.setHalfDuplex();  // Set Serial_SP to half-duplex mode
   Serial_SP.setTxInvert();    // Invert TX pin for Serial_SP
   Serial_SP.setRxInvert();    // Invert RX pin for Serial_SP
@@ -76,7 +84,7 @@ void setup() {
   delay(100);                 // Wait for Serial to be ready
   while(Serial_SP.available(  ) > 0) { // Clear any remaining data in the buffer
     Serial_SP.read();         // Clear any remaining data in the buffer
-    Serial_DBG.print("r");
+    Serial_DBG.println("r");
   }
   delay(10);
   setSensorID(SENSOR_ID); // Set the Sensor ID in the txPacket buffer;
@@ -84,44 +92,63 @@ void setup() {
 } 
 
 char c=0;
+bool EscapeNext = false; // Flag to indicate if the next character is escaped
 
 void loop() {
-  // put your main code here, to run repeatedly:
   digitalWrite(LED_BUILTIN, (i & 0x040000));
   i+=1;
-  uint8_t avail = Serial_SP.available();
-  if (avail > 0) {        // Check if data is available on Serial_SP
-    c = Serial_SP.read(); // Read the data from Serial_SP
-    if (c == SP_START) {  // Check if the first byte matches the start byte
-//      Serial_DBG.print("SmartPort polled Address : ");
-      if (check_am_I_addressed()) { // Check if I am addressd on SmartPort
-        if (millis() - LastTimeNow < VALID_DATA_INTERVAL_MS) {
-          sendMyNextSmartPortData(false);    // Send empty SmartPort data packet
+  if (Serial_SP.available()) {
+    c = Serial_SP.read();
+    if (c == SP_START) { // Start of frame character received 
+      printSmartPortData(); // Print the received SmartPort data for debugging purposes
+      clearReadBuffer(); // Clear the read buffer before starting a new frame
+      EscapeNext = false; // Reset the escape flag
+    }
+    else if (c == SP_ESCAPE) { // Escape character received
+      EscapeNext = true; // Set the flag to indicate the next character is escaped
+      return; // Skip adding the escape character to the buffer
+    }
+    else if (readBufINdex < sizeof(readBuffer) - 1) { // Ensure we don't overflow the buffer
+      if (EscapeNext) { // Escape character rceived as previous character
+        // Apply the escape sequence
+        if (c == 0x5e) { // 0x5e is the escaped version of 0x7e
+          c = 0x07e; // Replace with 0x7e
+        } 
+        else if (c == 0x5d) { // 0x5d is the escaped version of 0x7d
+          c = 0x7d; // Replace with 0x7d
         }
-        else{
-          LastTimeNow = millis();
-          prepare_SensorPacket(sensorPacketNr);
-          sendMyNextSmartPortData(true);     // Send the next SmartPort data packet
-          sensorPacketNr++;
-        }
+        EscapeNext = false; // Reset the escape flag
       }
+      readBuffer[readBufINdex] = c; // Store the character in the buffer
+      readBufINdex++;
     }
     else {
-//    Serial_DBG.println(c, HEX );
+      Serial_DBG.println("Buffer overflow");
+      clearReadBuffer(); // Clear the buffer to prevent further overflow
+    }
+    if (readBufINdex == 1 && readBuffer[0] == mySP_ID) { // Check if the first byte matches the sensor ID
+      answer_SmartPort(); // prepare & Send the next SmartPort data package;
+      clearReadBuffer(); // Clear the buffer after responding to the poll
     }
   }
-  else {
-//    Serial_DBG.println("no char  "); 
-  }
-//  delay(8); // Add a small delay to avoid flooding the Serial port
-//  Serial_DBG.print(".");
 }
 
+void answer_SmartPort(){
+  if (millis() - LastTimeNow < VALID_DATA_INTERVAL_MS) {
+    sendMyNextSmartPortData(false);    // Send empty SmartPort data packet
+  }
+  else{
+    LastTimeNow = millis();
+    prepare_SensorPacket(sensorPacketNr);
+    sendMyNextSmartPortData(true);     // Send the next SmartPort data packet
+    sensorPacketNr++;
+  }
+}
 
 void prepare_SensorPacket(uint32_t packetNr) {
   // Prepare the SmartPort data packet with sensor value based on packet number
   uint32_t sensorValue = 0;
-  switch (packetNr % 9) {
+  switch (packetNr % 13) {
     case 0:
       setSensorID(0x0900); // A3 sensor ID
       setSensorValue (0, 4,  i);
@@ -166,47 +193,93 @@ void prepare_SensorPacket(uint32_t packetNr) {
       setSensorValue (0, 1,  0x07); // Subadress 7 = Cell8 voltage
       setSensorValue (1, 3,  0x0FFF); // 3 Byte cell voltage Max value for 12 bit cell voltage = 8.19V
       break;
+    case 9:
+      prepare_SP_LON_Packet(-9.9*degree_in_minutes_div10k); //
+      break;
+    case 10:
+      prepare_SP_LAT_Packet(-45*degree_in_minutes_div10k); //
+      break;
+    case 11:
+      prepare_SP_Date_Packet(26, 12, 31); // Date packet with year, month and day
+      break;
+      case 12:
+      prepare_SP_Time_Packet(23, 59, 59); // Time packet with hour, minute and second
+      break;
     default:
       break;
   }
-
 }
 
-bool check_am_I_addressed() {
-      while (Serial_SP.available()<1) {
-        delay(1); // Wait until data is available
-      } 
-      c = Serial_SP.read();
-//      Serial_DBG.print(c,HEX);
-      if (c == mySP_ID) { // Check if the first byte matches the sensor ID
-//        Serial_DBG.println(" thats us!"); // Print a message if the sensor is addressed
-        return true; // Return true if polled
-      }
-      else {
-//        Serial_DBG.println(" not us!"); // Print a message if the sensor is not addressed
-        return false; // Return false if not adressed
-      }
+void prepare_SP_LON_Packet(int32_t lon_min_X10k) {
+  // Prepare the SmartPort data packet with GPS LON sensor value
+  lon_min_X10k = ((lon_min_X10k % (360*degree_in_minutes_div10k)) + (360 * degree_in_minutes_div10k)) % (360 * degree_in_minutes_div10k); // 
+  if (lon_min_X10k >= 180*degree_in_minutes_div10k) { // Check if the longitude value exceeds 180.0° in minute x 10k
+    lon_min_X10k = -lon_min_X10k + (360 * degree_in_minutes_div10k); // Make the longitude value positive for encoding
+    lon_min_X10k |= 0x1 << 30; // Set the West bit for negative longitude
+  }
+  setSensorID(0x0800); // GPS LAT or LON sensor ID
+  setSensorValue (0, 4,  0x1<<31 | lon_min_X10k); // 0x<<31 = Lon bit 
+}
+
+
+void prepare_SP_LAT_Packet(int32_t lat_min_X10k) {
+  // Prepare the SmartPort data packet with GPS LAT sensor value
+  if (lat_min_X10k < -90*degree_in_minutes_div10k) { // Check if the latitude value exceeds 90.0° in minute x 10k
+    lat_min_X10k = -90*degree_in_minutes_div10k; // Limit the latitude value to -90.0° for encoding
+  }
+  if (lat_min_X10k > 90*degree_in_minutes_div10k) { // Check if the latitude value exceeds 90.0° in minute x 10k
+    lat_min_X10k = 90*degree_in_minutes_div10k; // Limit the latitude value to 90.0° for encoding
+  }
+  if (lat_min_X10k < 0) { // Check if the latitude value is negative
+    lat_min_X10k = -lat_min_X10k; // Make the latitude value positive for encoding
+    lat_min_X10k |= 0x1 << 30; // Set the South bit for negative latitude
+  }
+  setSensorID(0x0800); // GPS LAT or LON sensor ID
+  setSensorValue (0, 4,  lat_min_X10k); 
+}
+
+void prepare_SP_Date_Packet(uint8_t year, uint8_t month, uint8_t day) {
+  uint32_t dateValue = 0;
+  if (month > 12) month = 12; // Limit month to 12 (4 bits)
+  if (day > 31) day = 31; // Limit day to 31 (5 bits)
+  dateValue |= (year) << 16;   // Year in bits 16-22
+  dateValue |= (month) << 8;   // Month in bits 8-11
+  dateValue |= (day );     // Day in bits 0-4
+  setSensorID(0x0850); // Date sensor ID
+  setSensorValue(0, 1, 0x01); // Subadress 1 = Date value
+  setSensorValue(1,3, dateValue); // Set the encoded date value in the sensor packet
+}
+
+void prepare_SP_Time_Packet(uint8_t hour, uint8_t minute, uint8_t second) {
+  uint32_t timeValue = 0;
+  if (hour > 23) hour = 23;       // Limit hour to 23
+  if (minute > 59) minute = 59;   // Limit minute to 59
+  if (second > 59) second = 59;   // Limit second to 59
+  // Encode the time values into a single 32-bit integer
+  timeValue |= (hour ) << 16;    // Hour in bits 16-20
+  timeValue |= (minute ) << 8;   // Minute in bits 8-13
+  timeValue |= (second );        // Second in bits 0-5
+  setSensorID(0x0850); // Time sensor ID
+  setSensorValue(0, 1, 0x00); // Subadress 0 = Time value
+  setSensorValue(1,3, timeValue); // Set the encoded time value in the sensor packet
 }
 
 void sendMyNextSmartPortData(bool validData) {
   // Send the next SmartPort data package
   if (validData) {
     setCRC(); // Calculate and set the CRC in the txPacket buffer
-    sprintf(iFormatedString, "%02X : ", (uint8_t)mySP_ID);
+    sprintf(iFormatedString, "\r\nt %02X: ", (uint8_t)mySP_ID);
     Serial_DBG.print(iFormatedString); // Print used Sensor ID 
   }
   for (uint8_t i = 0; i < sizeof txPacket; i++) {                 // Send the complete SmartPort data package
     if (validData) {
       outputSmartPortData(txPacket[i]); // Send the data from the txPackage buffer
-      sprintf(iFormatedString, "%02X ", (uint8_t)txPacket[i]);
+      sprintf(iFormatedString, "%02X, ", (uint8_t)txPacket[i]);
       Serial_DBG.print(iFormatedString); // Print sensor byte
     }
     else {
-      outputSmartPortData(emptyPacket[i]); // Send empty data package
+      outputSmartPortData(emptyTxPacket[i]); // Send empty data package
     }
-  }
-  if (validData) {
-    Serial_DBG.println();
   }
   Serial_SP.flush();              // wait until the TX buffer is empty
   Serial_SP.enableHalfDuplexRx(); // Reenable Serial_SP reception - without this USART reception is disabled by Serial_SP.write() in half-duplex mode
@@ -248,5 +321,56 @@ void outputSmartPortData(uint8_t character) {
   } 
   else {
     Serial_SP.write(character);                            // Send the character as is
+  }
+}
+
+char readSmartPortData() {
+  // Read a byte from Serial_SP and handle escape characters
+  while (Serial_SP.available() < 1) ;
+  char c = Serial_SP.read();
+  if (c == SP_ESCAPE) { // If the character is an escape character
+    while (Serial_SP.available() < 1) ; // Wait for the next byte to be available
+    c = Serial_SP.read() ^ 0x20; // Read the next byte and unescape it
+  }
+  return c; // Return the read character
+}
+
+void clearReadBuffer() {
+  // Clear the read buffer
+  for (uint8_t i = 0; i < sizeof(readBuffer); i++) {
+    readBuffer[i] = 0;
+  }
+  readBufINdex = 0; // Reset the index
+} 
+
+
+void printSmartPortData() {
+  // Print the SmartPort data stored in readBuffer
+  if (readBuffer[1] == 0x10) { // Check if the second byte indicates a valid sensor package
+    sprintf(iFormatedString, "\r\nr %02X: ", (uint8_t)readBuffer[0]);
+    Serial_DBG.print(iFormatedString); // Print the first byte in hexadecimal format
+    for (uint8_t i = 1; i < 9; i++) { // Print all bytes in the buffer in hexadecimal format
+      sprintf(iFormatedString, "%02X, ", (uint8_t)readBuffer[i]);
+      Serial_DBG.print(iFormatedString); // Print the received byte in hexadecimal format
+    }
+    sprintf(iFormatedString, " %02X: %02X, ", (uint8_t)readBuffer[0], (uint8_t)readBuffer[1]);
+    Serial_DBG.print(iFormatedString); // Print the first byte in hexadecimal format
+    uint16_t sensorID = (readBuffer[3] << 8) | readBuffer[2]; // Combine the first two bytes to get the sensor ID
+    sprintf(iFormatedString, "%04X, ", sensorID);
+    Serial_DBG.print(iFormatedString); // Print the sensor ID
+    if (sensorID == 0x0850){ // For sensor ID 0x0850 Date and Time,
+      sprintf(iFormatedString, "%02X, ", (uint8_t)readBuffer[4]); // Bufffer[4] =0 time =1 date =2
+      Serial_DBG.print(iFormatedString); // Print the received byte in hexadecimal format
+      uint32_t sensorValue =  readBuffer[5]; // Get the sensor value from the 5th byte
+      sprintf(iFormatedString, "%02u:%02u:%02u, ", readBuffer[7], readBuffer[6], readBuffer[5]); // Format the sensor value as date/time (HH:MM:SS)/YY:MM:DD)
+      Serial_DBG.print(iFormatedString); // Print the sensor value
+    }
+    else{ // For other sensor IDs, combine the next four bytes to get the sensor value
+      uint32_t sensorValue = (readBuffer[7] << 24) | (readBuffer[6] << 16) | (readBuffer[5] << 8) | readBuffer[4]; // Combine the next four bytes to get the sensor value
+      sprintf(iFormatedString, ",%011u, ", sensorValue); // 0x0820 = altitude in cm, 0x0830 = ground speed in cm/s, 0x0840 = heading  
+      Serial_DBG.print(iFormatedString); // Print the sensor value  
+      }
+    sprintf(iFormatedString, "%02X,  ", (uint8_t)readBuffer[8]);
+    Serial_DBG.print(iFormatedString); // Print the received byte in hexadecimal format
   }
 }
