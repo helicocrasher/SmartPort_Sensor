@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"name": "CRServoF2_STM32",
+			"path": "../../CRServoF2_STM32"
+		},
+		{
+			"name": "SmartPort_Sniffer",
+			"path": "../../SmartPort_Sniffer"
+		}
+	],
+	"settings": {}
+}
