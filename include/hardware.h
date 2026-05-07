@@ -8,7 +8,8 @@
     HardwareSerial Serial2(USART2); // PA2, PA3, TX, RX 
   #endif 
   #define Serial_SP Serial1
-  #define Serial_DBG Serial2
+  #define Serial_GNSS Serial2
+  #define Serial_DBG NullSerial
 #endif
 
 
@@ -25,6 +26,7 @@
     HardwareSerial Serial3(USART3); // PC10, PC11, TX, RX
   #endif
   #define Serial_SP Serial1
-  #define Serial_DBG Serial3
+  #define Serial_DBG Serial
+  #define Serial_GNSS Serial3
 
 #endif
