@@ -49,7 +49,7 @@ void setup() {
   while (!Serial_DBG && ((millis() - startTime) < 10000)){
     ; // Wait for the debug serial port to be ready
   }
-  delay(2000);
+  delay(3000);
 #endif
   Serial_DBG.println("SmartPort Sensor Hub starting up");
   delay(10);

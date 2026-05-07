@@ -22,10 +22,24 @@
   #ifndef Serial3
     HardwareSerial Serial3(USART3); // PC10, PC11, TX, RX
   #endif
-  #define Serial_SP Serial1
-  #define Serial_DBG Serial
+  #define Serial_SP   Serial1
+  #define Serial_DBG  Serial
   #define Serial_GNSS Serial3
   #define HAS_USB_SERIAL 
+#endif
+
+#ifdef TARGET_SEEED_XIAO_ESP32S3
+  #ifndef LED_BUILTIN
+    #define LED_BUILTIN d3
+  #endif
+  #define Serial_SP_TX D6 // Pin49 = D6
+  #define Serial_SP_RX D7 // Pin50 = D7
+  #define Serial_GNSS_TX D2 // Pin8 = D2
+  #define Serial_GNSS_RX D3 // Pin9 = D3
+  #define Serial_SP   Serial0
+  #define Serial_GNSS Serial1
+  #define Serial_DBG  Serial //  Seeed XIAO ESP32S3 has 3 hardware serial ports Serial0- Serial2
+  #define HAS_USB_SERIAL // USB Serial for debug output, as the Seeed XIAO ESP32S3 has a dedicated USB Serial port
 #endif
 
 #ifdef TARGET_WS_ESP32S3_ZERO
