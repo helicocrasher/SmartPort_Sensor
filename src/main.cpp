@@ -6,6 +6,7 @@
 #include "SmartPortSlave.h"
 #include "SparkFun_u-blox_GNSS_Arduino_Library.h" 
 #include "NullSerial.h"
+#include "telemetry_config.h"
 //#include <Adafruit_INA3221.h>
 //#include <Wire.h>
 
@@ -19,8 +20,12 @@
 #endif
 */
 
+#define SENSOR_ID 0x1b // Sensor ID for this SmartPort slave device (can be changed to a different value if needed, but should be unique among all devices on the same SmartPort bus)
+
 void printSmartPortData();
 void telemetryCarousel();
+void sendInavGnssPrecision(SFE_UBLOX_GNSS& gnss, int16_t sensorID);
+bool autoBaudGNSS(int rxPin, int txPin);
 
 SFE_UBLOX_GNSS myGNSS;
 SmartPortSlave mySmartPortSlave; // Create an instance of the SmartPortSlave class
@@ -28,19 +33,13 @@ SmartPortSlave mySmartPortSlave; // Create an instance of the SmartPortSlave cla
 void setup() {
   
   pinMode(LED_BUILTIN, OUTPUT);
-#ifdef TARGET_G431CB
+#ifdef ARDUINO_ARCH_STM32
 //  Serial_DBG.setTx(PC10);
 //  Serial_DBG.setRx(PC11);
-  Serial_GNSS.setTx(PA2);
-  Serial_GNSS.setRx(PA3);
-  Serial_SP.setTx(PA9);
-  Serial_SP.setRx(PA10);
-#endif
-#ifdef TARGET_G031F8
-  Serial_GNSS.setTx(PA2);
-  Serial_GNSS.setRx(PA3);
-  Serial_SP.setTx(PB6);
-  Serial_SP.setRx(PB7);
+  Serial_GNSS.setTx(Serial_GNSS_TX);
+  Serial_GNSS.setRx(Serial_GNSS_RX);
+  Serial_SP.setTx(Serial_SP_TX);
+  Serial_SP.setRx(Serial_SP_RX);
 #endif
   Serial_DBG.begin(115200); 
 #ifdef HAS_USB_SERIAL
@@ -55,12 +54,13 @@ void setup() {
   delay(10);
 //  mySmartPortSlave.begin(&Serial_SP, 0x6a, &Serial_DBG); // Initialize the SmartPort slave with the SmartPort serial stream, sensor ID and debug serial stream
 #ifdef ARDUINO_ARCH_ESP32
-  mySmartPortSlave.begin(&Serial_SP, 0x6a, nullptr, Serial_SP_RX, Serial_SP_TX, true); // Initialize SmartPort with explicit pins for ESP32
-  Serial_GNSS.begin(115200, SERIAL_8N1, Serial_GNSS_RX, Serial_GNSS_TX);
+  mySmartPortSlave.begin(&Serial_SP, SENSOR_ID, nullptr, Serial_SP_RX, Serial_SP_TX, true); // Initialize SmartPort with explicit pins for ESP32
+//  Serial_GNSS.begin(115200, SERIAL_8N1, Serial_GNSS_RX, Serial_GNSS_TX);
 #else  
-  mySmartPortSlave.begin(&Serial_SP, 0x6a, nullptr); // Initialize the SmartPort slave with the SmartPort serial stream, sensor ID and debug serial stream
-  Serial_GNSS.begin(115200); // Initialize the GNSS serial stream for communication with the u-blox GNSS module
+  mySmartPortSlave.begin(&Serial_SP, SENSOR_ID, nullptr); // Initialize the SmartPort slave with the SmartPort serial stream, sensor ID and debug serial stream
+//  Serial_GNSS.begin(115200); // Initialize the GNSS serial stream for communication with the u-blox GNSS module
 #endif  
+  autoBaudGNSS(Serial_GNSS_RX, Serial_GNSS_TX); // Perform auto-baud detection for the GNSS module to ensure proper communication at the correct baud rate
 
 
   delay(100);
@@ -70,7 +70,8 @@ void setup() {
   }
   Serial_DBG.println("u-blox GNSS initialization successful");
   myGNSS.setMeasurementRate(500);     // Set the GNSS module to 1 second (1000 ms) measurement rate
-  myGNSS.setAutoPVT(true);            // Enable automatic PVT data messages
+  myGNSS.setAutoPVT(true);            // Enable automatic PVT data messages$
+  myGNSS.setAutoDOP(true);            // Enable automatic DOP and Sat data messages
 //  myGNSS.enableDebugging();           // Uncomment this line to enable helpful debug messages on Serial
   myGNSS.setUART1Output(COM_TYPE_UBX);
 } 
@@ -93,6 +94,7 @@ void loop() {
   i+=1;
   telemetryCarousel(); // Update the telemetry carousel to send different sensor values in a rotating manner
   myGNSS.getPVT();
+  myGNSS.getDOP();
   mySmartPortSlave.update(); // Update the SmartPort slave to handle incoming data and send responses 
   if (mySmartPortSlave.sniffedDataAvailable()) { 
     mySmartPortSlave.getSniffedData(readBuffer); // Get the sniffed data and store it in the provided buffer
@@ -110,55 +112,131 @@ static uint8_t carouselIndex = 0;
   if (timeSinceLastUpdate <50) return;
   if (!mySmartPortSlave.txBufferEmpty()) return; 
   
-  switch (carouselIndex) {
-    case 0:
-      mySmartPortSlave.sendV_A3(i, 0x0901); 
-      break;
-    case 1:
-      mySmartPortSlave.sendCellVoltage(3700, 0, 0x00); 
-      break;
-    case 2:
-      mySmartPortSlave.sendCellVoltage(3800, 1, 0x00); 
-      break;
-    case 3:
-      mySmartPortSlave.sendCellVoltage(3900, 2, 0x00); 
-      break;
-    case 4:
-//      mySmartPortSlave.sendLON(-9.9*degree_in_minutes_div10k, 0x00); 
-      mySmartPortSlave.sendLON(((myGNSS.getLongitude()*3)/50), 0x00); 
-      break;
-    case 5:
-//      mySmartPortSlave.sendLAT(-45*degree_in_minutes_div10k, 0x00); 
-      mySmartPortSlave.sendLAT(((myGNSS.getLatitude()*3)/50), 0x00); 
-      break;
-    case 6:
-      mySmartPortSlave.sendDate(myGNSS.getYear()-208, myGNSS.getMonth(), myGNSS.getDay(), 0x00); 
-      break;
-    case 7:
-      mySmartPortSlave.sendTime(myGNSS.getHour(), myGNSS.getMinute(), myGNSS.getSecond(), 0x00); 
-      break;
-    case 8:
-//      mySmartPortSlave.sendSensorWord(myGNSS.getSIV(),(uint16_t)0x0480); 
-      mySmartPortSlave.sendGnssSats(myGNSS.getSIV(), 0x00);
+  uint8_t enabledCount = 0;
 
-      break;
-    case 9:
-      mySmartPortSlave.sendHeading(myGNSS.getHeading(), 0x00); 
-      break;
-    case 10:
-      mySmartPortSlave.sendGnssAltitude(myGNSS.getAltitudeMSL()/10, 0x00); 
-      break;
-    case 11:  
-      mySmartPortSlave.sendGnssSpeed(myGNSS.getGroundSpeed(), 0x00); 
-      break;
-    default: break;
+#ifdef ENABLE_SENSOR_V_A3
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendV_A3(i, 0x0901);
   }
-  carouselIndex = (carouselIndex + 1) % 12; // Move to the next index in the carousel
-  Serial_DBG.print(" ");
-  Serial_DBG.print(carouselIndex);
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_CELL_VOLTAGE_0
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendCellVoltage(3700/2, 0, 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_CELL_VOLTAGE_1
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendCellVoltage(3800/2, 1, 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_CELL_VOLTAGE_2
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendCellVoltage(3900/2, 2, 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_CELL_VOLTAGE_3
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendCellVoltage(4000/2, 3, 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_CELL_VOLTAGE_4
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendCellVoltage(4100/2, 4, 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_CELL_VOLTAGE_5
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendCellVoltage(4200/2, 5, 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_LON
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendLON(((myGNSS.getLongitude()*3)/50), 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_LAT
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendLAT(((myGNSS.getLatitude()*3)/50), 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_DATE
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendDate(myGNSS.getYear()-208, myGNSS.getMonth(), myGNSS.getDay(), 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_TIME
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendTime(myGNSS.getHour(), myGNSS.getMinute(), myGNSS.getSecond(), 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_INAV_GNSS_PRECISION
+  if (carouselIndex == enabledCount) {
+    sendInavGnssPrecision(myGNSS, 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_SATS_IN_VIEW
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendGnssSats(myGNSS.getSIV(), 0x01);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_GNSS_HEADING
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendHeading(myGNSS.getHeading(), 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_GNSS_ALTITUDE
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendGnssAltitude(myGNSS.getAltitudeMSL()/10, 0x00);
+  }
+  enabledCount++;
+#endif
+#ifdef ENABLE_SENSOR_GNSS_SPEED
+  if (carouselIndex == enabledCount) {
+    mySmartPortSlave.sendGnssSpeed(myGNSS.getGroundSpeed(), 0x00);
+  }
+  enabledCount++;
+#endif
+
+  if (enabledCount == 0) {
+    lastUpdateTime = millis();
+    return;
+  }
+
+  carouselIndex = (carouselIndex + 1) % enabledCount; // Move to the next enabled sensor slot
+//  Serial_DBG.print(" ");
+//  Serial_DBG.print(carouselIndex);
   lastUpdateTime = millis();
 }
 
+void sendInavGnssPrecision(SFE_UBLOX_GNSS& gnss, int16_t sensorID) {
+  sensorID = 0x0480 |(sensorID & 0x000f); // GNSS Satellites in view sensor ID used by iNav for the number of satellites in view
+  Serial_DBG.print(" Satellites in view: ");
+  Serial_DBG.print(gnss.getSIV());
+  Serial_DBG.print(" HDOP: ");
+  Serial_DBG.print(((float)gnss.getHorizontalDOP())/100);
+  Serial_DBG.print(" VDOP: ");
+  Serial_DBG.print(((float)gnss.getVerticalDOP())/100);
+  int32_t gnssLockPrecisionSats= gnss.getSIV();
+  int32_t iNavPPrecison =1000/((float)gnss.getHorizontalDOP());
+  if (iNavPPrecison > 9) iNavPPrecison = 9; // Limit the iNav precision value to 9 for encoding in a single decimal digit
+  gnssLockPrecisionSats = gnssLockPrecisionSats + 100*iNavPPrecison; // Combine the number of satellites in view with the iNav precision value for encoding in a single byte (0-3 satellites = poor lock, 4-6 = moderate lock, 7-9 = good lock, with the iNav precision value providing additional granularity within those categories) ;
+  if (gnssLockPrecisionSats > 3) gnssLockPrecisionSats = gnssLockPrecisionSats + 3000; // Encode the number of satellites in view with an offset to distinguish it from the case of 0-3 satellites which can be used to indicate a poor GNSS lock
+  mySmartPortSlave.sendSensorWord(gnssLockPrecisionSats, (uint16_t)sensorID); // Send HDOP as a floating point value in the sensor value field
+}
 
 void printSmartPortData() {
   // Print the SmartPort data stored in readBuffer
@@ -191,4 +269,45 @@ void printSmartPortData() {
     Serial_DBG.print(iFormatedString); // Print the received byte in hexadecimal format
   /**/ 
   } 
+}
+
+
+bool autoBaudGNSS(int rxPin, int txPin) {
+  // Attempt to connect to the GNSS module at different baud rates until successful
+  const uint32_t possibleBauds[] = {115200, 9600, 19200, 38400, 57600}; // List of possible baud rates to try
+  uint8_t BaudRateIndex = 0;
+
+  Serial_DBG.print(("Attempting to connect to GNSS module with "));
+  Serial_DBG.println(possibleBauds[BaudRateIndex]);
+  #ifdef ARDUINO_ARCH_ESP32
+    Serial_GNSS.begin(possibleBauds[BaudRateIndex], SERIAL_8N1, rxPin, txPin);
+  #else
+    Serial_GNSS.begin(possibleBauds[BaudRateIndex]);
+  #endif
+  //myGNSS.enableDebugging(); // Uncomment this line to enable helpful debug messages on Serial
+  while (myGNSS.begin(Serial_GNSS) == false) //Connect to the u-blox module using gnssSerial (defined above)
+  {
+    delay (500);
+    BaudRateIndex++;
+    BaudRateIndex = BaudRateIndex % 5;    Serial_DBG.print(("Attempting to connect to GNSS module with "));
+    Serial_DBG.println(possibleBauds[BaudRateIndex]);
+    #ifdef ARDUINO_ARCH_ESP32
+      Serial_GNSS.begin(possibleBauds[BaudRateIndex], SERIAL_8N1, rxPin, txPin);
+    #else
+      Serial_GNSS.begin(possibleBauds[BaudRateIndex]);
+    #endif
+  }
+  Serial_DBG.print(("Connected to GNSS module at "));
+  Serial_DBG.print(possibleBauds[BaudRateIndex]);
+  Serial_DBG.println((" baud."));
+  if (BaudRateIndex != 0){
+    BaudRateIndex = 0; // We want to set back to 115200
+    myGNSS.setSerialRate(possibleBauds[BaudRateIndex]); // Set u-blox module to 115200 baud for reconnect
+    Serial_GNSS.begin(possibleBauds[BaudRateIndex]);
+    Serial_DBG.print(("Reconnected to GNSS module at "));
+    Serial_DBG.print(possibleBauds[BaudRateIndex]);
+    Serial_DBG.println((" baud."));
+  }
+  myGNSS.setMeasurementRate(200); // Set the GNSS module to 1 second (1000 ms) measurement rate
+  return true;  
 }
