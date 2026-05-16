@@ -10,15 +10,7 @@
 //#include <Adafruit_INA3221.h>
 //#include <Wire.h>
 
-/*
-//#define HAL_UART_MODULE_ENABLED
-#if !defined(STM32_CORE_VERSION) || (STM32_CORE_VERSION < 0x02110000)
-//    #error "This sketch requires STM32 core version 2.11.0 or higher"
-#endif
-#if !defined(STM32_CORE_VERSION) || (STM32_CORE_VERSION == 0x02100100)
-    #error "STM32 core version is 2.10.1"
-#endif
-*/
+
 
 #define SENSOR_ID 0x1b // Sensor ID for this SmartPort slave device (can be changed to a different value if needed, but should be unique among all devices on the same SmartPort bus)
 
@@ -34,8 +26,6 @@ void setup() {
   
   pinMode(LED_BUILTIN, OUTPUT);
 #ifdef ARDUINO_ARCH_STM32
-//  Serial_DBG.setTx(PC10);
-//  Serial_DBG.setRx(PC11);
   Serial_GNSS.setTx(Serial_GNSS_TX);
   Serial_GNSS.setRx(Serial_GNSS_RX);
   Serial_SP.setTx(Serial_SP_TX);
@@ -43,7 +33,6 @@ void setup() {
 #endif
   Serial_DBG.begin(115200); 
 #ifdef HAS_USB_SERIAL
-//  #error "HAS_USB_SERIAL should not be defined for this target"
   int startTime = millis();
   while (!Serial_DBG && ((millis() - startTime) < 10000)){
     ; // Wait for the debug serial port to be ready
@@ -60,20 +49,24 @@ void setup() {
   mySmartPortSlave.begin(&Serial_SP, SENSOR_ID, nullptr); // Initialize the SmartPort slave with the SmartPort serial stream, sensor ID and debug serial stream
 //  Serial_GNSS.begin(115200); // Initialize the GNSS serial stream for communication with the u-blox GNSS module
 #endif  
-  autoBaudGNSS(Serial_GNSS_RX, Serial_GNSS_TX); // Perform auto-baud detection for the GNSS module to ensure proper communication at the correct baud rate
-
-
+  
   delay(100);
-  if (myGNSS.begin(Serial_GNSS) == false) { // Initialize the u-blox GNSS module and check if it was successful
+  
+  if (autoBaudGNSS(Serial_GNSS_RX, Serial_GNSS_TX) == false) { // Initialize the u-blox GNSS module and check if it was successful
     Serial_DBG.println("u-blox GNSS initialization failed");
     while (1); // If initialization failed, enter an infinite loop to halt the program
   }
   Serial_DBG.println("u-blox GNSS initialization successful");
-  myGNSS.setMeasurementRate(500);     // Set the GNSS module to 1 second (1000 ms) measurement rate
-  myGNSS.setAutoPVT(true);            // Enable automatic PVT data messages$
+  myGNSS.saveConfiguration();         // Save the selected baudrate of 115200 permanently for faster power ups in future
+  myGNSS.setMeasurementRate(250);     // Set the GNSS module to xxx ms
+  myGNSS.setAutoPVT(true);            // Enable automatic PVT data messages
   myGNSS.setAutoDOP(true);            // Enable automatic DOP and Sat data messages
-//  myGNSS.enableDebugging();           // Uncomment this line to enable helpful debug messages on Serial
   myGNSS.setUART1Output(COM_TYPE_UBX);
+#ifdef HAS_USB_SERIAL
+  Serial_DBG.println("GNSS module configured and ready");  
+//  myGNSS.enableDebugging();           // Uncomment this line to enable helpful debug messages on Serial
+#endif
+
 } 
 
 uint32_t i;
@@ -224,14 +217,18 @@ static uint8_t carouselIndex = 0;
 
 void sendInavGnssPrecision(SFE_UBLOX_GNSS& gnss, int16_t sensorID) {
   sensorID = 0x0480 |(sensorID & 0x000f); // GNSS Satellites in view sensor ID used by iNav for the number of satellites in view
+#ifdef HAS_USB_SERIAL
   Serial_DBG.print(" Satellites in view: ");
   Serial_DBG.print(gnss.getSIV());
   Serial_DBG.print(" HDOP: ");
   Serial_DBG.print(((float)gnss.getHorizontalDOP())/100);
   Serial_DBG.print(" VDOP: ");
   Serial_DBG.print(((float)gnss.getVerticalDOP())/100);
+#endif
   int32_t gnssLockPrecisionSats= gnss.getSIV();
-  int32_t iNavPPrecison =1000/((float)gnss.getHorizontalDOP());
+  //int32_t iNavPPrecison =1000/((float)gnss.getHorizontalDOP());
+  int32_t iNavPPrecison =1000/(gnss.getHorizontalDOP()); // no float to reduce flash usage.
+  
   if (iNavPPrecison > 9) iNavPPrecison = 9; // Limit the iNav precision value to 9 for encoding in a single decimal digit
   gnssLockPrecisionSats = gnssLockPrecisionSats + 100*iNavPPrecison; // Combine the number of satellites in view with the iNav precision value for encoding in a single byte (0-3 satellites = poor lock, 4-6 = moderate lock, 7-9 = good lock, with the iNav precision value providing additional granularity within those categories) ;
   if (gnssLockPrecisionSats > 3) gnssLockPrecisionSats = gnssLockPrecisionSats + 3000; // Encode the number of satellites in view with an offset to distinguish it from the case of 0-3 satellites which can be used to indicate a poor GNSS lock
@@ -284,12 +281,16 @@ bool autoBaudGNSS(int rxPin, int txPin) {
   #else
     Serial_GNSS.begin(possibleBauds[BaudRateIndex]);
   #endif
-  //myGNSS.enableDebugging(); // Uncomment this line to enable helpful debug messages on Serial
-  while (myGNSS.begin(Serial_GNSS) == false) //Connect to the u-blox module using gnssSerial (defined above)
+
+  while ((myGNSS.begin(Serial_GNSS) == false)) //Connect to the u-blox module using gnssSerial (defined above)
   {
-    delay (500);
+    delay (5);
     BaudRateIndex++;
-    BaudRateIndex = BaudRateIndex % 5;    Serial_DBG.print(("Attempting to connect to GNSS module with "));
+    if (BaudRateIndex >= sizeof(possibleBauds)) {
+      Serial_DBG.println(("Failed to connect to GNSS module at all tested baud rates."));
+      return false; // If we've tried all baud rates and failed, return false
+    }  
+    Serial_DBG.print(("Attempting to connect to GNSS module with "));
     Serial_DBG.println(possibleBauds[BaudRateIndex]);
     #ifdef ARDUINO_ARCH_ESP32
       Serial_GNSS.begin(possibleBauds[BaudRateIndex], SERIAL_8N1, rxPin, txPin);
@@ -308,6 +309,5 @@ bool autoBaudGNSS(int rxPin, int txPin) {
     Serial_DBG.print(possibleBauds[BaudRateIndex]);
     Serial_DBG.println((" baud."));
   }
-  myGNSS.setMeasurementRate(200); // Set the GNSS module to 1 second (1000 ms) measurement rate
   return true;  
 }
